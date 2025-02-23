@@ -1,0 +1,39 @@
+网络药理学靶点交集代码：
+
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib_venn import venn2
+
+# 设置中文字体（解决中文显示问题）
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
+# 读取数据
+df_green = pd.read_excel('绿原酸靶点.xlsx')  # 绿原酸靶点数据
+df_nafld = pd.read_excel('非酒精性脂肪肝靶点.xlsx')  # 非酒精性脂肪肝数据
+
+# 转换为集合求交集
+set_green = set(df_green['Targets'].unique())
+set_nafld = set(df_nafld['Gene Symbol'].unique())
+intersection = set_green & set_nafld
+
+# 生成结果表格
+result_df = df_nafld[df_nafld['Gene Symbol'].isin(intersection)]
+result_df = result_df.rename(columns={'Gene Symbol': '交集靶点'})
+result_df = result_df[['交集靶点', 'Relevance score']].sort_values('交集靶点')
+
+# 保存结果
+result_df.to_excel('交集结果.xlsx', index=False)
+
+# 绘制韦恩图
+plt.figure(figsize=(8, 6))
+venn = venn2([set_green, set_nafld],
+             set_labels=('绿原酸靶点', '非酒精性脂肪肝靶点'),
+             set_colors=('#1f77b4', '#ff7f0e'),
+             alpha=0.7)
+
+# 添加标题和调整显示
+plt.title("靶点韦恩图", fontsize=15, pad=20)
+plt.tight_layout()
+plt.savefig('靶点韦恩图.png', dpi=300)
+plt.show()
