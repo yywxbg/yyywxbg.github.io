@@ -1,0 +1,435 @@
+1、交集靶点GO富集分析表的生成代码：
+
+import pandas as pd
+
+# 输入文件路径
+file_taoren = "绿原酸GO.xlsx"  # 替换为“桃仁的总生物信息”文件路径
+file_intersection = "交集结果.xlsx"  # 替换为“intersection_with_scores”文件路径
+output_file = "成分-靶点GO关联.xlsx"  # 输出文件名
+
+# 加载 Excel 数据
+try:
+    df_taoren = pd.read_excel(file_taoren)  # 桃仁的总生物信息
+    df_intersection = pd.read_excel(file_intersection)  # intersection_with_scores
+except FileNotFoundError as e:
+    print(f"文件未找到：{e}")
+    exit()
+
+# 提取“intersection_with_scores”中的基因列表
+intersection_genes = set(df_intersection["Gene"].dropna())  # 提取交集基因
+
+# 定义一个函数，用于统计匹配到的基因数量
+def count_matched_genes(gene_names_column):
+    # 将基因名字符串分割为列表
+    gene_list = gene_names_column.split(";")
+    # 统计与交集基因匹配的数量
+    matched_genes = [gene for gene in gene_list if gene in intersection_genes]
+    # 返回匹配基因数量和匹配到的基因
+    return len(matched_genes), ";".join(matched_genes)
+
+# 对“桃仁的总生物信息”中的最后一列进行匹配统计
+df_taoren["Matched Gene Count"], df_taoren["Matched Genes"] = zip(
+    *df_taoren["cluster1-gene names"].apply(count_matched_genes)
+)
+
+# 按 Description 分组，统计每个 Description 的匹配基因总数
+description_stats = df_taoren.groupby("Description").agg(
+    {
+        "Matched Gene Count": "sum",  # 统计匹配基因总数
+        "Matched Genes": lambda x: ";".join(x),  # 合并所有匹配到的基因
+        "cluster1-Pvalue": "first",  # 保留第一个值
+        "cluster1-gene number": "first",  # 保留第一个值
+        "cluster1-EnrichRatio": "first",  # 保留第一个值
+        "cluster1-gene names": lambda x: ";".join(x),  # 合并所有基因名
+    }
+).reset_index()
+
+# 过滤掉匹配基因总数为 0 的行
+description_stats = description_stats[description_stats["Matched Gene Count"] > 0]
+
+# 按匹配到的基因总数降序排列
+description_stats = description_stats.sort_values(by="Matched Gene Count", ascending=False)
+
+# 输出结果到 Excel 文件
+description_stats.to_excel(output_file, index=False)
+
+print(f"统计结果已保存到文件：{output_file}")
+
+2、交集靶点的GO富集分析连线图的生成代码：
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+# 读取Excel文件
+file_name = "真正的GO关联.xlsx"  # 替换为您的文件名
+data = pd.read_excel(file_name)
+
+# 根据P.value排序并取前10个
+data = data.sort_values(by='P.value').head(10)
+
+# 分割Gene names（如果基因名称是以分号分隔的）
+data['Gene names'] = data['Gene names'].fillna('').str.strip().str.split(';')  # 去除空格并分割
+data = data.explode('Gene names')  # 将每个基因名称展开为单独的行
+
+# 删除空白基因
+data = data[data['Gene names'] != '']  # 删除基因名称为空的行
+
+# 确保Description按照P.value从小到大排序
+descriptions_sorted = data.groupby('Description')['P.value'].min().sort_values(ascending=True).index  # 按P.value排序
+descriptions_sorted = descriptions_sorted[::-1]  # 倒序排列（小的在上，大的在下）
+data['Description'] = pd.Categorical(data['Description'], categories=descriptions_sorted, ordered=True)
+
+# 限制显示的基因数量最多为 20 个
+unique_genes = data['Gene names'].dropna().unique()  # 获取所有基因名称
+if len(unique_genes) > 20:
+    displayed_genes = unique_genes[:20]  # 只显示前 20 个基因
+else:
+    displayed_genes = unique_genes  # 如果少于 20 个基因，按实际数量显示
+
+# 准备绘图
+fig, ax = plt.subplots(figsize=(12, 8))
+
+# 左侧绘制基因名称
+gene_y_positions = np.linspace(0, 1, len(displayed_genes))  # 基因的 y 坐标（归一化到 [0, 1]）
+for i, gene in enumerate(displayed_genes):
+    ax.text(-0.1, gene_y_positions[i], gene, ha='right', va='center', fontsize=10, color='black')
+
+# 右侧绘制 GO 功能描述和气泡图
+description_y_positions = np.linspace(0, 1, len(descriptions_sorted))  # GO 功能的 y 坐标（归一化到 [0, 1]）
+
+# 绘制气泡图
+bubble_sizes = data.groupby('Description')['EnrichRatio'].first()  # 气泡大小
+bubble_colors = data.groupby('Description')['P.value'].first()  # 气泡颜色
+for i, description in enumerate(descriptions_sorted):
+    # 绘制气泡
+    ax.scatter(
+        0.5, description_y_positions[i],  # 气泡位置
+        s=bubble_sizes[description] * 50,  # 调整气泡大小比例
+        c=[bubble_colors[description]], cmap='RdBu', vmin=data['P.value'].min(), vmax=data['P.value'].max(),
+        edgecolor='black', alpha=0.8
+    )
+    # 添加 GO 功能描述名称
+    ax.text(0.55, description_y_positions[i], description, ha='left', va='center', fontsize=10, color='black')
+
+# 绘制连接线
+for _, row in data.iterrows():
+    # 找到基因和描述的索引
+    gene_idx = np.where(displayed_genes == row['Gene names'])[0]  # 只考虑显示的基因
+    description_idx = np.where(descriptions_sorted == row['Description'])[0]
+    if len(description_idx) > 0:  # 确保描述索引存在
+        gene_y = gene_y_positions[gene_idx[0]] if len(gene_idx) > 0 else np.random.uniform(0, 1)  # 如果基因不在显示范围内，随机分配 y 坐标
+        ax.plot(
+            [0, 0.5],  # 从左侧基因到右侧 GO 功能的 x 坐标
+            [gene_y, description_y_positions[description_idx[0]]],  # y 坐标
+            color='gray', alpha=0.5
+        )
+
+# 设置图形范围
+ax.set_xlim(-0.2, 0.7)
+ax.set_ylim(-0.1, 1.1)
+
+# 隐藏坐标轴
+ax.axis('off')
+
+# 添加标题
+plt.title('GO Enrichment Bubble Chart with Gene Connections', fontsize=14)
+
+# 显示图表
+plt.tight_layout()
+plt.show()
+
+3、交集靶点的GO富集分析气泡图的生成代码：
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib as mpl
+
+# 读取Excel文件
+file_name = "真正的GO关联.xlsx"  # 替换为您的文件名
+data = pd.read_excel(file_name)
+
+# 根据P.value排序并取前10个
+data = data.sort_values(by='P.value').head(10)
+
+# 计算GeneRatio
+data['GeneRatio'] = data['Gene number'] / data['Gene number'].sum()
+
+# 设置绘图风格
+sns.set(style="whitegrid")
+
+# 创建绘图对象
+plt.figure(figsize=(8, 6))
+
+# 绘制气泡图
+bubble_plot = sns.scatterplot(
+    data=data,
+    x='GeneRatio',
+    y='Description',
+    size='Gene number',
+    hue='P.value',
+    palette='RdBu',  # 红到蓝的颜色映射，红色表示显著性更高（P.value 越小越鲜红）
+    sizes=(40, 200),  # 调整气泡大小范围
+    edgecolor='black',
+    alpha=0.8
+)
+
+# 设置颜色图例
+norm = mpl.colors.Normalize(vmin=data['P.value'].min(), vmax=data['P.value'].max())
+sm = plt.cm.ScalarMappable(cmap="RdBu", norm=norm)  # 调整为 RdBu
+sm.set_array([])
+color_legend = plt.colorbar(sm, ax=bubble_plot, pad=0.01, shrink=0.6)  # 缩短颜色图例并调整位置
+color_legend.set_label('p.adjust')
+
+# 自定义气泡大小图例
+handles, labels = bubble_plot.get_legend_handles_labels()
+bubble_plot.legend_.remove()  # 移除默认图例
+size_legend = plt.legend(
+    handles[-3:],  # 仅保留最后三个大小句柄
+    labels[-3:],  # 对应的标签
+    title="Count",
+    loc='lower left',  # 图例放置在左下角
+    bbox_to_anchor=(1.02, 0.0),  # 调整位置到颜色图例正下方，进一步靠近
+    frameon=True  # 添加边框
+)
+
+# 设置轴标签和标题
+plt.xlabel('GeneRatio', fontsize=12)
+plt.ylabel('', fontsize=14)  # 移除 Description 标题
+plt.title('', fontsize=14)
+
+# 调整 y 轴刻度字体大小和加粗
+plt.tick_params(axis='y', labelsize=12)  # 加大 y 轴字体
+for label in plt.gca().get_yticklabels():
+    label.set_fontweight('bold')  # 加粗 y 轴字体
+
+# 调整 x 轴刻度字体大小
+plt.tick_params(axis='x', labelsize=12)  # 加大 x 轴字体
+
+# 调整布局
+plt.tight_layout()
+
+# 显示图表
+plt.show()
+
+4、交集靶点的KEGG富集分析表的生成代码：
+
+import pandas as pd
+
+# 输入文件路径
+file_kegg = "绿原酸KEGG（整体）.xlsx"  # 替换为 KEGG 文件路径
+file_intersection = "成分-靶点（score）.xlsx"  # 替换为“intersection_with_scores”文件路径
+output_file = "成分-靶点KEGG关联.xlsx"  # 输出文件名
+
+# 加载 Excel 数据
+try:
+    df_kegg = pd.read_excel(file_kegg)  # KEGG 数据
+    df_intersection = pd.read_excel(file_intersection)  # intersection_with_scores
+except FileNotFoundError as e:
+    print(f"文件未找到：{e}")
+    exit()
+
+# 提取“成分-靶点”中的基因列表，统一格式（去除空格并转为大写）
+intersection_genes = set(df_intersection["Gene"].dropna().str.strip().str.upper())
+
+# 定义一个函数，用于统计匹配到的基因数量
+def count_matched_genes(gene_names_column):
+    # 如果是缺失值或非字符串，直接返回 0 和空字符串
+    if not isinstance(gene_names_column, str):
+        return 0, ""
+    # 将基因名字符串分割为列表，并统一格式
+    gene_list = [gene.strip().upper() for gene in gene_names_column.split(";") if gene.strip()]
+    # 统计与交集基因匹配的数量
+    matched_genes = [gene for gene in gene_list if gene in intersection_genes]
+    # 返回匹配基因数量和匹配到的基因
+    return len(matched_genes), ";".join(matched_genes)
+
+# 对 KEGG 数据中的基因列进行匹配统计
+df_kegg["Matched Gene Count"], df_kegg["Matched Genes"] = zip(
+    *df_kegg["gene names"].fillna("").apply(count_matched_genes)
+)
+
+# 按 Term description 分组，统计每个 Term description 的匹配基因总数
+kegg_stats = df_kegg.groupby("Term description").agg(
+    {
+        "Matched Gene Count": "sum",  # 统计匹配基因总数
+        "Matched Genes": lambda x: ";".join(x),  # 合并所有匹配到的基因
+        "p-value": "first",  # 保留第一个值
+        "coverage": "first",  # 保留第一个值
+        "EnrichRatio": "first",  # 保留第一个值
+        "gene names": lambda x: ";".join(x),  # 合并所有基因名
+    }
+).reset_index()
+
+# 过滤掉匹配基因总数为 0 的行
+kegg_stats = kegg_stats[kegg_stats["Matched Gene Count"] > 0]
+
+# 按匹配到的基因总数降序排列
+kegg_stats = kegg_stats.sort_values(by="Matched Gene Count", ascending=False)
+
+# 输出结果到 Excel 文件
+kegg_stats.to_excel(output_file, index=False)
+
+print(f"统计结果已保存到文件：{output_file}")
+
+5、交集靶点的KEGG富集分析连线图的生成代码：
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+
+# 读取Excel文件
+file_name = "真正的KEGG.xlsx"  # 替换为您的文件名
+data = pd.read_excel(file_name)
+
+# 根据P.value排序并取前10个
+data = data.sort_values(by='P.value').head(10)
+
+# 计算GeneRatio
+data['GeneRatio'] = data['Coverage']  # 使用Coverage作为GeneRatio
+
+# 分割基因名称（如果基因名称是以分号分隔的）
+data['Gene name'] = data['Gene name'].fillna('').str.strip().str.split(';')  # 去除空格并分割
+data = data.explode('Gene name')  # 将每个基因名称展开为单独的行
+
+# 删除空白基因
+data = data[data['Gene name'] != '']  # 删除基因名称为空的行
+
+# 确保Signal pathway按照P.value从小到大排序
+pathways_sorted = data.groupby('Signal pathway')['P.value'].min().sort_values(ascending=True).index  # 按P.value排序
+pathways_sorted = pathways_sorted[::-1]  # 倒序排列（小的在上，大的在下）
+data['Signal pathway'] = pd.Categorical(data['Signal pathway'], categories=pathways_sorted, ordered=True)
+
+# 限制显示的基因数量最多为 20 个
+unique_genes = data['Gene name'].dropna().unique()  # 获取所有基因名称
+if len(unique_genes) > 20:
+    displayed_genes = unique_genes[:20]  # 只显示前 20 个基因
+else:
+    displayed_genes = unique_genes  # 如果少于 20 个基因，按实际数量显示
+
+# 准备绘图
+fig, ax = plt.subplots(figsize=(12, 8))
+
+# 左侧绘制基因名称
+gene_y_positions = np.linspace(0, 1, len(displayed_genes))  # 基因的 y 坐标（归一化到 [0, 1]）
+for i, gene in enumerate(displayed_genes):
+    ax.text(-0.1, gene_y_positions[i], gene, ha='right', va='center', fontsize=10, color='black')
+
+# 右侧绘制信号通路和气泡图
+pathway_y_positions = np.linspace(0, 1, len(pathways_sorted))  # 信号通路的 y 坐标（归一化到 [0, 1]）
+
+# 绘制气泡图
+bubble_sizes = data.groupby('Signal pathway')['EnrichRatio'].first()  # 气泡大小
+bubble_colors = data.groupby('Signal pathway')['P.value'].first()  # 气泡颜色
+for i, pathway in enumerate(pathways_sorted):
+    # 绘制气泡
+    ax.scatter(
+        0.5, pathway_y_positions[i],  # 气泡位置
+        s=bubble_sizes[pathway] * 100,  # 调整气泡大小
+        c=[bubble_colors[pathway]], cmap='RdBu', vmin=data['P.value'].min(), vmax=data['P.value'].max(),
+        edgecolor='black', alpha=0.8
+    )
+    # 添加信号通路名称
+    ax.text(0.55, pathway_y_positions[i], pathway, ha='left', va='center', fontsize=10, color='black')
+
+# 绘制连接线
+for _, row in data.iterrows():
+    # 找到基因和信号通路的索引
+    gene_idx = np.where(displayed_genes == row['Gene name'])[0]  # 只考虑显示的基因
+    pathway_idx = np.where(pathways_sorted == row['Signal pathway'])[0]
+    if len(pathway_idx) > 0:  # 确保信号通路索引存在
+        gene_y = gene_y_positions[gene_idx[0]] if len(gene_idx) > 0 else np.random.uniform(0, 1)  # 如果基因不在显示范围内，随机分配 y 坐标
+        ax.plot(
+            [0, 0.5],  # 从左侧基因到右侧信号通路的 x 坐标
+            [gene_y, pathway_y_positions[pathway_idx[0]]],  # y 坐标
+            color='gray', alpha=0.5
+        )
+
+# 设置图形范围
+ax.set_xlim(-0.2, 0.7)
+ax.set_ylim(-0.1, 1.1)
+
+# 隐藏坐标轴
+ax.axis('off')
+
+# 添加标题
+plt.title('KEGG Pathway Enrichment Bubble Chart with Gene Connections', fontsize=14)
+
+# 显示图表
+plt.tight_layout()
+plt.show()
+
+6、交集靶点的KEGG富集分析气泡图的生成代码：
+
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import matplotlib as mpl
+
+# 读取Excel文件
+file_name = "真正的KEGG.xlsx"  # 替换为您的文件名
+data = pd.read_excel(file_name)
+
+# 根据P.value排序并取前10个
+data = data.sort_values(by='P.value').head(10)
+
+# 计算GeneRatio
+data['GeneRatio'] = data['Coverage']  # 使用Coverage作为GeneRatio
+
+# 设置绘图风格
+sns.set(style="whitegrid")
+
+# 创建绘图对象
+plt.figure(figsize=(8, 6))
+
+# 绘制气泡图
+bubble_plot = sns.scatterplot(
+    data=data,
+    x='GeneRatio',  # 横轴为GeneRatio
+    y='Signal pathway',  # 纵轴为信号通路
+    size='EnrichRatio',  # 气泡大小为EnrichRatio
+    hue='P.value',  # 气泡颜色为P.value
+    palette='RdBu',  # 红到蓝的颜色映射，红色表示显著性更高（P.value 越小越鲜红）
+    sizes=(40, 200),  # 调整气泡大小范围
+    edgecolor='black',
+    alpha=0.8
+)
+
+# 设置颜色图例
+norm = mpl.colors.Normalize(vmin=data['P.value'].min(), vmax=data['P.value'].max())
+sm = plt.cm.ScalarMappable(cmap="RdBu", norm=norm)  # 调整为 RdBu
+sm.set_array([])
+color_legend = plt.colorbar(sm, ax=bubble_plot, pad=0.01, shrink=0.6)  # 缩短颜色图例并调整位置
+color_legend.set_label('P.value')
+
+# 自定义气泡大小图例
+handles, labels = bubble_plot.get_legend_handles_labels()
+bubble_plot.legend_.remove()  # 移除默认图例
+size_legend = plt.legend(
+    handles[-3:],  # 仅保留最后三个大小句柄
+    labels[-3:],  # 对应的标签
+    title="EnrichRatio",
+    loc='lower left',  # 图例放置在左下角
+    bbox_to_anchor=(1.02, 0.0),  # 调整位置到颜色图例正下方，进一步靠近
+    frameon=True  # 添加边框
+)
+
+# 设置轴标签和标题
+plt.xlabel('GeneRatio', fontsize=12)
+plt.ylabel('', fontsize=14)  # 移除 Signal pathway 标题
+plt.title('KEGG Pathway Enrichment Bubble Chart', fontsize=14)
+
+# 调整 y 轴刻度字体大小和加粗
+plt.tick_params(axis='y', labelsize=12)  # 加大 y 轴字体
+for label in plt.gca().get_yticklabels():
+    label.set_fontweight('bold')  # 加粗 y 轴字体
+
+# 调整 x 轴刻度字体大小
+plt.tick_params(axis='x', labelsize=12)  # 加大 x 轴字体
+
+# 调整布局
+plt.tight_layout()
+
+# 显示图表
+plt.show()
