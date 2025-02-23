@@ -1,0 +1,223 @@
+1、将sdf格式的文件生成带有1024位摩根指纹的Excel表格的代码：
+
+import pandas as pd  
+from rdkit import Chem  
+from rdkit.Chem import AllChem  
+
+def sdf_to_morgan_fingerprints(sdf_filenames):  
+    data = []  
+
+    for filename in sdf_filenames:  
+        supplier = Chem.SDMolSupplier(filename)  
+        for mol in supplier:  
+            if mol is not None:  
+                # 获取分子名称（通常是 SDF 的首个属性）  
+                name = mol.GetProp('NAME') if mol.HasProp('NAME') else f'Molecule_{len(data) + 1}'  
+
+                # 计算 1024 位的摩根指纹  
+                fingerprint = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=1024)  
+                fingerprint_array = list(fingerprint)  # 将指纹转换为列表类型  
+
+                # 将数据添加到列表中  
+                data.append([name] + fingerprint_array + [1])  # 最后加上 label  
+
+    return data  
+
+# 用于 SDF 文件的列表  
+sdf_filenames = [  
+    'kangzhifanggan.sdf',  
+    'kangdongmaizhouyangyinghua.sdf',  
+    'kanggaoxuezhi.sdf'  
+]  
+
+# 将 SDF 转换为摩根指纹数据  
+fingerprint_data = sdf_to_morgan_fingerprints(sdf_filenames)  
+
+# 创建一个 DataFrame  
+columns = ['Molecule_Name'] + [f'Bit_{i + 1}' for i in range(1024)] + ['Label']  
+df = pd.DataFrame(fingerprint_data, columns=columns)  
+
+# 导出到 Excel 文件  
+output_filename = 'fingerprints.xlsx'  
+df.to_excel(output_filename, index=False)  
+
+print(f'Data has been exported to {output_filename}')
+
+2、将化合物的SMILES转换成摩根指纹的代码：
+
+import pandas as pd
+from rdkit import Chem
+from rdkit.Chem import AllChem
+
+def smiles_to_morgan_fingerprints(input_file, output_file):
+    """
+    将包含SMILES的CSV文件转换为摩根指纹Excel文件
+    
+    参数：
+    input_file (str): 输入CSV文件路径（需包含compound_name和smiles列）
+    output_file (str): 输出Excel文件路径
+    """
+    try:
+        # 读取输入文件
+        df = pd.read_csv(input_file)
+        
+        # 校验必要列是否存在
+        if not {'compound_name', 'smiles'}.issubset(df.columns):
+            raise ValueError("输入文件必须包含compound_name和smiles列")
+
+        result_data = []
+        
+        # 处理每个化合物
+        for _, row in df.iterrows():
+            compound_name = row['compound_name']
+            smiles = row['smiles']
+            
+            # 生成分子对象
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                print(f"警告：无法解析 {compound_name} 的SMILES: {smiles}，已跳过")
+                continue
+            
+            # 生成1024位摩根指纹
+            fp = AllChem.GetMorganFingerprintAsBitVect(
+                mol, 
+                radius=2,  # 默认半径
+                nBits=1024
+            )
+            
+            # 转换位向量为整数列表
+            fp_bits = list(map(int, fp.ToBitString()))
+            
+            # 添加结果数据
+            result_data.append([compound_name] + fp_bits + [0])
+
+        # 创建列名列表
+        columns = ['compound_name'] + [f'bit_{i}' for i in range(1024)] + ['label']
+        
+        # 创建DataFrame并保存
+        result_df = pd.DataFrame(result_data, columns=columns)
+        result_df.to_excel(
+            output_file,
+            index=False,
+            engine='openpyxl'
+        )
+        
+        print(f"转换成功！结果已保存至 {output_file}")
+
+    except Exception as e:
+        print(f"发生错误: {str(e)}")
+
+if __name__ == "__main__":
+    # 使用示例
+    smiles_to_morgan_fingerprints(
+        input_file="input.csv",    # 替换为你的输入文件路径
+        output_file="morgan_fingerprints.xlsx"
+    )
+
+3、机器学习预测模型的代码：
+
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.svm import SVC
+from sklearn.pipeline import make_pipeline
+from sklearn.metrics import (roc_curve, auc, confusion_matrix,
+                             f1_score, recall_score, accuracy_score,
+                             ConfusionMatrixDisplay)
+
+# 读取数据
+nadata = pd.read_excel("NAFLD database.xlsx")
+X = nadata.iloc[:, 1:-1]  # 特征列
+y = nadata.iloc[:, -1]    # 标签列
+
+# 划分训练集和测试集
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42
+)
+
+# 定义模型（使用pipeline处理标准化）
+models = {
+    "Logistic Regression": make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000)),
+    "Random Forest": RandomForestClassifier(random_state=42),
+    "Gradient Boosting": GradientBoostingClassifier(random_state=42),
+    "Support Vector Machine": make_pipeline(StandardScaler(), SVC(probability=True, random_state=42))
+}
+
+# 训练模型并记录结果
+results = []
+roc_data = {}
+
+# 创建画布准备绘制混淆矩阵
+fig_cm, axs_cm = plt.subplots(2, 2, figsize=(12, 10))
+axs_cm = axs_cm.ravel()
+
+for idx, (name, model) in enumerate(models.items()):
+    # 训练模型
+    model.fit(X_train, y_train)
+    
+    # 预测结果
+    y_pred = model.predict(X_test)
+    y_proba = model.predict_proba(X_test)[:, 1]
+    
+    # 计算评估指标
+    f1 = f1_score(y_test, y_pred)
+    sensitivity = recall_score(y_test, y_pred)
+    accuracy = accuracy_score(y_test, y_pred)
+    fpr, tpr, _ = roc_curve(y_test, y_proba)
+    roc_auc = auc(fpr, tpr)
+    
+    # 存储结果
+    results.append({
+        "Model": name,
+        "F1 Score": round(f1, 4),
+        "Sensitivity": round(sensitivity, 4),
+        "Accuracy": round(accuracy, 4),
+        "AUC": round(roc_auc, 4)
+    })
+    
+    # 存储ROC数据
+    roc_data[name] = (fpr, tpr, roc_auc)
+    
+    # 绘制混淆矩阵
+    cm = confusion_matrix(y_test, y_pred)
+    ConfusionMatrixDisplay(cm).plot(ax=axs_cm[idx])
+    axs_cm[idx].set_title(name)
+
+# 保存混淆矩阵图像
+fig_cm.tight_layout()
+fig_cm.savefig("Confusion_Matrices.png")
+plt.close(fig_cm)
+
+# 绘制ROC曲线
+plt.figure(figsize=(10, 8))
+for name, (fpr, tpr, auc_score) in roc_data.items():
+    plt.plot(fpr, tpr, label=f"{name} (AUC = {auc_score:.4f})")
+
+plt.plot([0, 1], [0, 1], "k--")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC Curves Comparison")
+plt.legend(loc="lower right")
+plt.savefig("ROC_Curves.png")
+plt.close()
+
+# 保存评估结果
+pd.DataFrame(results).to_excel("Model_Evaluation.xlsx", index=False)
+
+# 预测新数据
+predict_data = pd.read_excel("Chlorogenic acid.xlsx")
+molecule_names = predict_data.iloc[:, 0]
+X_new = predict_data.iloc[:, 1:]
+
+# 创建预测结果DataFrame
+pred_results = {"Molecule_Name": molecule_names}
+for name, model in models.items():
+    pred_results[name] = model.predict_proba(X_new)[:, 1]
+
+pd.DataFrame(pred_results).to_excel("Prediction_Results.xlsx", index=False)
+
+print("所有任务已完成！结果文件已保存到当前目录。")
