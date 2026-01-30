@@ -1,223 +1,425 @@
-1、将sdf格式的文件生成带有1024位摩根指纹的Excel表格的代码：
+# =====================================
+# NAFLD Machine Learning Full Pipeline
+# Stable Version (NO statsmodels)
+# =====================================
 
-import pandas as pd  
-from rdkit import Chem  
-from rdkit.Chem import AllChem  
-
-def sdf_to_morgan_fingerprints(sdf_filenames):  
-    data = []  
-
-    for filename in sdf_filenames:  
-        supplier = Chem.SDMolSupplier(filename)  
-        for mol in supplier:  
-            if mol is not None:  
-                # 获取分子名称（通常是 SDF 的首个属性）  
-                name = mol.GetProp('NAME') if mol.HasProp('NAME') else f'Molecule_{len(data) + 1}'  
-
-                # 计算 1024 位的摩根指纹  
-                fingerprint = AllChem.GetMorganFingerprintAsBitVect(mol, radius=2, nBits=1024)  
-                fingerprint_array = list(fingerprint)  # 将指纹转换为列表类型  
-
-                # 将数据添加到列表中  
-                data.append([name] + fingerprint_array + [1])  # 最后加上 label  
-
-    return data  
-
-# 用于 SDF 文件的列表  
-sdf_filenames = [  
-    'kangzhifanggan.sdf',  
-    'kangdongmaizhouyangyinghua.sdf',  
-    'kanggaoxuezhi.sdf'  
-]  
-
-# 将 SDF 转换为摩根指纹数据  
-fingerprint_data = sdf_to_morgan_fingerprints(sdf_filenames)  
-
-# 创建一个 DataFrame  
-columns = ['Molecule_Name'] + [f'Bit_{i + 1}' for i in range(1024)] + ['Label']  
-df = pd.DataFrame(fingerprint_data, columns=columns)  
-
-# 导出到 Excel 文件  
-output_filename = 'fingerprints.xlsx'  
-df.to_excel(output_filename, index=False)  
-
-print(f'Data has been exported to {output_filename}')
-
-2、将化合物的SMILES转换成摩根指纹的代码：
-
-import pandas as pd
-from rdkit import Chem
-from rdkit.Chem import AllChem
-
-def smiles_to_morgan_fingerprints(input_file, output_file):
-    """
-    将包含SMILES的CSV文件转换为摩根指纹Excel文件
-    
-    参数：
-    input_file (str): 输入CSV文件路径（需包含compound_name和smiles列）
-    output_file (str): 输出Excel文件路径
-    """
-    try:
-        # 读取输入文件
-        df = pd.read_csv(input_file)
-        
-        # 校验必要列是否存在
-        if not {'compound_name', 'smiles'}.issubset(df.columns):
-            raise ValueError("输入文件必须包含compound_name和smiles列")
-
-        result_data = []
-        
-        # 处理每个化合物
-        for _, row in df.iterrows():
-            compound_name = row['compound_name']
-            smiles = row['smiles']
-            
-            # 生成分子对象
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                print(f"警告：无法解析 {compound_name} 的SMILES: {smiles}，已跳过")
-                continue
-            
-            # 生成1024位摩根指纹
-            fp = AllChem.GetMorganFingerprintAsBitVect(
-                mol, 
-                radius=2,  # 默认半径
-                nBits=1024
-            )
-            
-            # 转换位向量为整数列表
-            fp_bits = list(map(int, fp.ToBitString()))
-            
-            # 添加结果数据
-            result_data.append([compound_name] + fp_bits + [0])
-
-        # 创建列名列表
-        columns = ['compound_name'] + [f'bit_{i}' for i in range(1024)] + ['label']
-        
-        # 创建DataFrame并保存
-        result_df = pd.DataFrame(result_data, columns=columns)
-        result_df.to_excel(
-            output_file,
-            index=False,
-            engine='openpyxl'
-        )
-        
-        print(f"转换成功！结果已保存至 {output_file}")
-
-    except Exception as e:
-        print(f"发生错误: {str(e)}")
-
-if __name__ == "__main__":
-    # 使用示例
-    smiles_to_morgan_fingerprints(
-        input_file="input.csv",    # 替换为你的输入文件路径
-        output_file="morgan_fingerprints.xlsx"
-    )
-
-3、机器学习预测模型的代码：
-
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
+import seaborn as sns
+
+from sklearn.model_selection import (
+    train_test_split, GridSearchCV,
+    StratifiedKFold, learning_curve
+)
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
-from sklearn.pipeline import make_pipeline
-from sklearn.metrics import (roc_curve, auc, confusion_matrix,
-                             f1_score, recall_score, accuracy_score,
-                             ConfusionMatrixDisplay)
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
-# 读取数据
-nadata = pd.read_excel("NAFLD database.xlsx")
-X = nadata.iloc[:, 1:-1]  # 特征列
-y = nadata.iloc[:, -1]    # 标签列
+from sklearn.metrics import (
+    accuracy_score, recall_score, precision_score, f1_score,
+    roc_auc_score, matthews_corrcoef, confusion_matrix,
+    roc_curve, ConfusionMatrixDisplay
+)
+from sklearn.calibration import calibration_curve
 
-# 划分训练集和测试集
+# ===============================
+# 0. Trend smoothing function
+# ===============================
+def smooth_trend(x, y, window=15):
+    """
+    Moving average smoothing for trend visualization
+    """
+    order = np.argsort(x)
+    x_sorted = x[order]
+    y_sorted = y[order]
+
+    kernel = np.ones(window) / window
+    y_smooth = np.convolve(y_sorted, kernel, mode="same")
+
+    return x_sorted, y_smooth
+
+# ===============================
+# 1. Load dataset
+# ===============================
+data = pd.read_excel("非酒精性脂肪肝数据集.xlsx")
+
+X = data.iloc[:, 1:-1].values   # 1024-bit Morgan fingerprints
+y = data.iloc[:, -1].values    # Label (0/1)
+
+# ===============================
+# 2. Train / test split (8:2)
+# ===============================
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, stratify=y, random_state=42
+    X, y,
+    test_size=0.2,
+    random_state=42,
+    stratify=y
 )
 
-# 定义模型（使用pipeline处理标准化）
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# ===============================
+# 3. Model definitions & grids
+# ===============================
 models = {
-    "Logistic Regression": make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000)),
-    "Random Forest": RandomForestClassifier(random_state=42),
-    "Gradient Boosting": GradientBoostingClassifier(random_state=42),
-    "Support Vector Machine": make_pipeline(StandardScaler(), SVC(probability=True, random_state=42))
+    "RF": (
+        RandomForestClassifier(random_state=42),
+        {
+            "n_estimators": [200, 500],
+            "max_depth": [None, 10, 20],
+            "min_samples_split": [2, 5]
+        }
+    ),
+    "GB": (
+        GradientBoostingClassifier(random_state=42),
+        {
+            "n_estimators": [100, 200],
+            "learning_rate": [0.05, 0.1],
+            "max_depth": [3, 5]
+        }
+    ),
+    "LR": (
+        Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", LogisticRegression(
+                max_iter=500, solver="lbfgs", random_state=42))
+        ]),
+        {
+            "clf__C": [0.01, 0.1, 1, 10]
+        }
+    ),
+    "SVM": (
+        Pipeline([
+            ("scaler", StandardScaler()),
+            ("clf", SVC(
+                probability=True, random_state=42))
+        ]),
+        {
+            "clf__C": [0.1, 1, 10],
+            "clf__gamma": ["scale", "auto"]
+        }
+    )
 }
 
-# 训练模型并记录结果
-results = []
-roc_data = {}
+best_models = {}
+performance = []
 
-# 创建画布准备绘制混淆矩阵
-fig_cm, axs_cm = plt.subplots(2, 2, figsize=(12, 10))
-axs_cm = axs_cm.ravel()
+# ===============================
+# 4. Grid search & evaluation
+# ===============================
+for name, (model, param_grid) in models.items():
+    print(f"Training {name} ...")
 
-for idx, (name, model) in enumerate(models.items()):
-    # 训练模型
-    model.fit(X_train, y_train)
-    
-    # 预测结果
-    y_pred = model.predict(X_test)
-    y_proba = model.predict_proba(X_test)[:, 1]
-    
-    # 计算评估指标
-    f1 = f1_score(y_test, y_pred)
-    sensitivity = recall_score(y_test, y_pred)
-    accuracy = accuracy_score(y_test, y_pred)
-    fpr, tpr, _ = roc_curve(y_test, y_proba)
-    roc_auc = auc(fpr, tpr)
-    
-    # 存储结果
-    results.append({
+    grid = GridSearchCV(
+        model,
+        param_grid,
+        cv=cv,
+        scoring="roc_auc",
+        n_jobs=-1
+    )
+    grid.fit(X_train, y_train)
+    best_models[name] = grid.best_estimator_
+
+    y_pred = grid.predict(X_test)
+    y_prob = grid.predict_proba(X_test)[:, 1]
+
+    tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+
+    performance.append({
         "Model": name,
-        "F1 Score": round(f1, 4),
-        "Sensitivity": round(sensitivity, 4),
-        "Accuracy": round(accuracy, 4),
-        "AUC": round(roc_auc, 4)
+        "Accuracy": accuracy_score(y_test, y_pred),
+        "Sensitivity": recall_score(y_test, y_pred),
+        "Specificity": tn / (tn + fp),
+        "Precision": precision_score(y_test, y_pred),
+        "F1-score": f1_score(y_test, y_pred),
+        "AUC": roc_auc_score(y_test, y_prob),
+        "MCC": matthews_corrcoef(y_test, y_pred)
     })
-    
-    # 存储ROC数据
-    roc_data[name] = (fpr, tpr, roc_auc)
-    
-    # 绘制混淆矩阵
-    cm = confusion_matrix(y_test, y_pred)
-    ConfusionMatrixDisplay(cm).plot(ax=axs_cm[idx])
-    axs_cm[idx].set_title(name)
 
-# 保存混淆矩阵图像
-fig_cm.tight_layout()
-fig_cm.savefig("Confusion_Matrices.png")
-plt.close(fig_cm)
+# ===============================
+# 5. Save results to Excel
+# ===============================
+perf_df = pd.DataFrame(performance)
+perf_df.to_excel(
+    "非酒精性脂肪肝预测模型性能评估表.xlsx",
+    index=False
+)
 
-# 绘制ROC曲线
-plt.figure(figsize=(10, 8))
-for name, (fpr, tpr, auc_score) in roc_data.items():
-    plt.plot(fpr, tpr, label=f"{name} (AUC = {auc_score:.4f})")
+# ===============================
+# 6. ROC curves
+# ===============================
+plt.figure(figsize=(7, 6))
+for name, model in best_models.items():
+    y_prob = model.predict_proba(X_test)[:, 1]
+    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    auc = roc_auc_score(y_test, y_prob)
+    plt.plot(fpr, tpr, linewidth=3, label=f"{name} (AUC={auc:.3f})")
 
 plt.plot([0, 1], [0, 1], "k--")
 plt.xlabel("False Positive Rate")
 plt.ylabel("True Positive Rate")
-plt.title("ROC Curves Comparison")
-plt.legend(loc="lower right")
-plt.savefig("ROC_Curves.png")
-plt.close()
+plt.title("ROC Curves")
+plt.legend()
+plt.tight_layout()
+plt.show()
 
-# 保存评估结果
-pd.DataFrame(results).to_excel("Model_Evaluation.xlsx", index=False)
+# ===============================
+# 7. Learning curves
+# ===============================
+plt.figure(figsize=(7, 6))
+colors = {"RF": "tab:blue", "GB": "tab:orange",
+          "LR": "tab:green", "SVM": "tab:red"}
 
-# 预测新数据
-predict_data = pd.read_excel("Chlorogenic acid.xlsx")
-molecule_names = predict_data.iloc[:, 0]
-X_new = predict_data.iloc[:, 1:]
+for name, model in best_models.items():
+    train_sizes, train_scores, val_scores = learning_curve(
+        model, X_train, y_train,
+        cv=cv,
+        scoring="accuracy",
+        train_sizes=np.linspace(0.1, 1.0, 8),
+        n_jobs=-1
+    )
 
-# 创建预测结果DataFrame
-pred_results = {"Molecule_Name": molecule_names}
-for name, model in models.items():
-    pred_results[name] = model.predict_proba(X_new)[:, 1]
+    plt.plot(train_sizes, train_scores.mean(axis=1),
+             color=colors[name], linewidth=3,
+             label=f"{name} - Training")
 
-pd.DataFrame(pred_results).to_excel("Prediction_Results.xlsx", index=False)
+    plt.plot(train_sizes, val_scores.mean(axis=1),
+             linestyle="--", color=colors[name],
+             linewidth=3, label=f"{name} - Validation")
 
-print("所有任务已完成！结果文件已保存到当前目录。")
+plt.xlabel("Training Set Size")
+plt.ylabel("Accuracy")
+plt.title("Learning Curves")
+plt.legend()
+plt.grid(True, linestyle="--", alpha=0.4)
+plt.tight_layout()
+plt.show()
+
+# ===============================
+# 8. Calibration curves
+# ===============================
+plt.figure(figsize=(7, 6))
+for name, model in best_models.items():
+    y_prob = model.predict_proba(X_test)[:, 1]
+    prob_true, prob_pred = calibration_curve(y_test, y_prob, n_bins=10)
+    plt.plot(prob_pred, prob_true, marker="o", linewidth=2, label=name)
+
+plt.plot([0, 1], [0, 1], "k--")
+plt.xlabel("Predicted Probability")
+plt.ylabel("Observed Probability")
+plt.title("Calibration Curves")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+# ===============================
+# 9. Confusion matrices
+# ===============================
+fig, axes = plt.subplots(2, 2, figsize=(8, 8))
+axes = axes.flatten()
+
+for ax, (name, model) in zip(axes, best_models.items()):
+    y_pred = model.predict(X_test)
+    cm = confusion_matrix(y_test, y_pred)
+    disp = ConfusionMatrixDisplay(cm)
+    disp.plot(ax=ax, colorbar=False)
+    ax.set_title(name)
+
+plt.tight_layout()
+plt.show()
+
+# ===============================
+# 10. Prediction deviation plots
+# ===============================
+fig, axes = plt.subplots(1, 4, figsize=(16, 4), sharey=True)
+
+for ax, (name, model) in zip(axes, best_models.items()):
+    y_prob = model.predict_proba(X_test)[:, 1]
+    y_pred = (y_prob >= 0.5).astype(int)
+    deviation = np.abs(y_test - y_prob)
+
+    correct = y_pred == y_test
+    error = ~correct
+
+    sc = ax.scatter(
+        y_prob[correct], deviation[correct],
+        c=deviation[correct], cmap="Greens",
+        edgecolor="k", s=50, label="Correct"
+    )
+
+    ax.scatter(
+        y_prob[error], deviation[error],
+        c=deviation[error], cmap="Reds",
+        marker="x", s=70, label="Error"
+    )
+
+    x_trend, y_trend = smooth_trend(y_prob, deviation, window=15)
+    ax.plot(x_trend, y_trend,
+            "--", color="navy", linewidth=2, label="Trend")
+
+    ax.axvline(0.5, linestyle=":", color="gray")
+    ax.axhline(0.5, linestyle=":", color="gray")
+
+    ax.set_title(name, fontweight="bold")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Predicted Probability")
+
+axes[0].set_ylabel("|Deviation|")
+
+handles, labels = axes[0].get_legend_handles_labels()
+fig.legend(handles, labels, loc="upper center", ncol=3, frameon=True)
+
+cbar = fig.colorbar(sc, ax=axes, shrink=0.75)
+cbar.set_label("Deviation Level")
+
+plt.tight_layout(rect=[0, 0, 1, 0.85])
+plt.show()
+
+# =====================================
+# 11. NEW: 甜菜碱化合物预测
+# =====================================
+
+# 加载甜菜碱摩根指纹数据集
+print("\n" + "="*60)
+print("开始预测甜菜碱化合物的抗NAFLD活性...")
+print("="*60)
+
+try:
+    # 读取甜菜碱数据
+    betaine_data = pd.read_excel("甜菜碱摩根指纹.xlsx")
+    
+    # 提取化合物名称和摩根指纹
+    compound_names = betaine_data.iloc[:, 0].values  # 第一列：Compound
+    betaine_fingerprints = betaine_data.iloc[:, 1:].values  # 第二列到最后一列：摩根指纹
+    
+    print(f"成功加载 {len(compound_names)} 个甜菜碱化合物")
+    print(f"摩根指纹维度: {betaine_fingerprints.shape[1]} 位")
+    
+    # 创建一个DataFrame来存储所有预测结果
+    prediction_results = pd.DataFrame()
+    prediction_results["Compound"] = compound_names
+    
+    # 使用四个训练好的模型进行预测
+    print("\n正在进行模型预测...")
+    
+    for model_name, model in best_models.items():
+        print(f"  使用 {model_name} 模型预测...")
+        
+        # 预测活性概率（属于类别1的概率）
+        if hasattr(model, 'predict_proba'):
+            proba = model.predict_proba(betaine_fingerprints)[:, 1]
+        else:
+            # 如果模型没有predict_proba方法，使用decision_function
+            if hasattr(model, 'decision_function'):
+                scores = model.decision_function(betaine_fingerprints)
+                # 将分数转换为概率（使用sigmoid函数）
+                proba = 1 / (1 + np.exp(-scores))
+            else:
+                # 如果也没有decision_function，则使用predict
+                predictions = model.predict(betaine_fingerprints)
+                proba = predictions.astype(float)
+        
+        # 根据概率进行分类（阈值=0.5）
+        predictions = (proba >= 0.5).astype(int)
+        
+        # 将结果添加到DataFrame中
+        prediction_results[f"{model_name}_Probability"] = proba
+        prediction_results[f"{model_name}_Prediction"] = predictions
+        
+        # 添加解释性标签
+        prediction_results[f"{model_name}_Activity"] = [
+            "Active" if p == 1 else "Inactive" for p in predictions
+        ]
+    
+    # 计算平均概率和综合预测
+    prob_columns = [f"{model_name}_Probability" for model_name in best_models.keys()]
+    prediction_results["Average_Probability"] = prediction_results[prob_columns].mean(axis=1)
+    prediction_results["Consensus_Prediction"] = (prediction_results["Average_Probability"] >= 0.5).astype(int)
+    prediction_results["Consensus_Activity"] = [
+        "Active" if p == 1 else "Inactive" for p in prediction_results["Consensus_Prediction"]
+    ]
+    
+    # 按平均概率降序排序
+    prediction_results = prediction_results.sort_values("Average_Probability", ascending=False)
+    
+    # 添加排名
+    prediction_results["Rank"] = range(1, len(prediction_results) + 1)
+    
+    # 重新排列列顺序
+    column_order = ["Rank", "Compound", "Average_Probability", "Consensus_Prediction", "Consensus_Activity"]
+    for model_name in best_models.keys():
+        column_order.extend([
+            f"{model_name}_Probability",
+            f"{model_name}_Prediction",
+            f"{model_name}_Activity"
+        ])
+    
+    prediction_results = prediction_results[column_order]
+    
+    # 保存预测结果到Excel
+    output_filename = "甜菜碱抗NAFLD活性可能性.xlsx"
+    prediction_results.to_excel(output_filename, index=False)
+    
+    print(f"\n✓ 预测完成！")
+    print(f"✓ 结果已保存到: {output_filename}")
+    
+    # 显示一些统计信息
+    print("\n预测结果统计:")
+    print("-" * 40)
+    total_compounds = len(prediction_results)
+    active_compounds = sum(prediction_results["Consensus_Prediction"] == 1)
+    inactive_compounds = total_compounds - active_compounds
+    
+    print(f"总化合物数: {total_compounds}")
+    print(f"预测为活性（Active）的化合物: {active_compounds} ({active_compounds/total_compounds*100:.1f}%)")
+    print(f"预测为非活性（Inactive）的化合物: {inactive_compounds} ({inactive_compounds/total_compounds*100:.1f}%)")
+    
+    # 显示前10个最有希望的化合物
+    print("\n前10个最有希望的化合物:")
+    print("-" * 60)
+    top_10 = prediction_results.head(10)
+    for _, row in top_10.iterrows():
+        print(f"{row['Rank']:2d}. {row['Compound']:30s} | "
+              f"平均概率: {row['Average_Probability']:.3f} | "
+              f"活性: {row['Consensus_Activity']}")
+    
+    # 可选：创建预测结果的可视化
+    plt.figure(figsize=(12, 6))
+    
+    # 子图1：活性分布
+    plt.subplot(1, 2, 1)
+    activity_counts = prediction_results["Consensus_Activity"].value_counts()
+    colors = ["lightcoral", "lightgreen"]
+    plt.pie(activity_counts.values, labels=activity_counts.index, 
+            autopct='%1.1f%%', colors=colors, startangle=90)
+    plt.title("甜菜碱化合物活性分布")
+    
+    # 子图2：概率分布直方图
+    plt.subplot(1, 2, 2)
+    plt.hist(prediction_results["Average_Probability"], bins=20, 
+             edgecolor='black', alpha=0.7, color='steelblue')
+    plt.axvline(x=0.5, color='red', linestyle='--', label='阈值 (0.5)')
+    plt.xlabel("平均预测概率")
+    plt.ylabel("化合物数量")
+    plt.title("预测概率分布")
+    plt.legend()
+    
+    plt.tight_layout()
+    plt.savefig("甜菜碱预测结果可视化.png", dpi=300, bbox_inches='tight')
+    plt.show()
+    
+    print(f"\n✓ 可视化图表已保存为: 甜菜碱预测结果可视化.png")
+    
+except FileNotFoundError:
+    print("错误: 未找到文件 '甜菜碱摩根指纹.xlsx'")
+    print("请确保文件存在于当前目录中")
+except Exception as e:
+    print(f"预测过程中发生错误: {str(e)}")
+
+print("\n" + "="*60)
+print("程序执行完成！")
+print("="*60)
